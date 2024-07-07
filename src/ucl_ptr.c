@@ -55,12 +55,21 @@ __ucl_ptr_linear(const ucl_voidp ptr)
 UCL_PUBLIC(unsigned)
 __ucl_align_gap(const ucl_voidp ptr, ucl_uint size)
 {
-    ucl_uintptr_t p, s, n;
+#if defined(__CHERI__) && defined(__CHERI_PURE_CAPABILITY__) && defined(__PTRADDR_TYPE__)
+    typedef __PTRADDR_TYPE__ my_ptraddr_t;
+#else
+    typedef ucl_uintptr_t my_ptraddr_t;
+#endif
+    my_ptraddr_t p, s, n;
 
     assert(size > 0);
 
+#if defined(__CHERI__) && defined(__CHERI_PURE_CAPABILITY__) && defined(__PTRADDR_TYPE__)
+    p = __builtin_cheri_address_get(ptr);
+#else
     p = __ucl_ptr_linear(ptr);
-    s = (ucl_uintptr_t) (size - 1);
+#endif
+    s = (my_ptraddr_t) (size - 1);
 #if 0
     assert((size & (size - 1)) == 0);
     n = ((p + s) & ~s) - p;

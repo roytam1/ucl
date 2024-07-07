@@ -173,7 +173,7 @@
 #undef UA_GET4
 #undef UA_SET4
 #if 1 && defined(__GNUC__)
-# if ACC_ARCH_AMD64 || ACC_ARCH_IA32 || defined(__aarch64__) || defined(__powerpc64__)
+# if ACC_ARCH_AMD64 || ACC_ARCH_IA32 || (__ARM_FEATURE_UNALIGNED) || defined(__powerpc64__)
 #  define UCL_UA_ATTR __attribute__((__packed__,__aligned__(1),__may_alias__))
    typedef struct UCL_UA_ATTR { unsigned short v; } UCL_UA2_T;
    typedef struct UCL_UA_ATTR { acc_uint32e_t v; } UCL_UA4_T;

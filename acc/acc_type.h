@@ -189,7 +189,13 @@ __acc_gnuc_extension__ typedef unsigned long long acc_ullong_t;
 
 
 #if !defined(acc_intptr_t)
-#if (ACC_ARCH_IA32 && ACC_CC_MSC && (_MSC_VER >= 1300))
+#if defined(__INTPTR_TYPE__) && defined(__UINTPTR_TYPE__)
+   typedef __INTPTR_TYPE__      acc_intptr_t;
+   typedef __UINTPTR_TYPE__     acc_uintptr_t;
+#  define acc_intptr_t          acc_intptr_t
+#  define acc_uintptr_t         acc_uintptr_t
+#  define SIZEOF_ACC_INTPTR_T   SIZEOF_VOID_P
+#elif (ACC_ARCH_IA32 && ACC_CC_MSC && (_MSC_VER >= 1300))
    typedef __w64 int            acc_intptr_t;
    typedef __w64 unsigned int   acc_uintptr_t;
 #  define acc_intptr_t          acc_intptr_t

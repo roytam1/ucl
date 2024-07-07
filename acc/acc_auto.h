@@ -553,7 +553,11 @@
 #define SIZEOF_INT              (__ACC_INT_BIT / 8)
 #define SIZEOF_LONG             (__ACC_LONG_BIT / 8)
 
-#if (ACC_OS_WIN64) /* LLP64 programming model */
+#if defined(__SIZEOF_PTRDIFF_T__) && defined(__SIZEOF_SIZE_T__) && defined(__SIZEOF_POINTER__)
+#  define SIZEOF_PTRDIFF_T      __SIZEOF_PTRDIFF_T__
+#  define SIZEOF_SIZE_T         __SIZEOF_SIZE_T__
+#  define SIZEOF_VOID_P         __SIZEOF_POINTER__
+#elif (ACC_OS_WIN64) /* LLP64 programming model */
 #  define SIZEOF_PTRDIFF_T      8
 #  define SIZEOF_SIZE_T         8
 #  define SIZEOF_VOID_P         8
