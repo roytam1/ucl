@@ -364,6 +364,75 @@ void swd_exit(ucl_swd_t *s)
     (s->bp > (pos) ? s->bp - (pos) : s->b_size - ((pos) - s->bp))
 
 
+/* NRV-inspired cheapest-vs-longest cost (cf. sub_44F820 cost tables).
+ * Mirrors len_of_coded_match in n2_99.ch (including expensive-skip
+ * b>=len*9) for use inside swd_search, where that function is not
+ * visible (defined later). Returns -1 if invalid/expensive. */
+static int
+swd_match_cost(const ucl_swd_t *s, ucl_uint m_len, ucl_uint m_off)
+{
+#if defined(M2_MAX_OFFSET)
+    const UCL_COMPRESS_T *c = s->c;
+    int b;
+    ucl_uint orig_len = m_len;
+    ucl_uint last = c->last_m_off;
+    if (m_len < 2 || (m_len == 2 && (m_off > (ucl_uint)M2_MAX_OFFSET))
+        || m_off == 0 || m_off > c->conf.max_offset)
+        return -1;
+    m_len = m_len - 2 - (m_off > (ucl_uint)M2_MAX_OFFSET);
+    if (m_off == last)
+        b = 1 + 2;
+    else
+    {
+#if defined(NRV2B)
+        b = 1 + 10;
+        m_off = (m_off - 1) >> 8;
+        while (m_off > 0) { b += 2; m_off >>= 1; }
+#elif defined(NRV2D) || defined(NRV2E)
+        b = 1 + 9;
+        m_off = (m_off - 1) >> 7;
+        while (m_off > 0) { b += 3; m_off >>= 2; }
+#else
+        return -1;
+#endif
+    }
+#if defined(NRV2B) || defined(NRV2D)
+    b += 2;
+    if (m_len < 3)
+    {
+        if (b >= (int)(orig_len * 9))
+            return -1;
+        return b;
+    }
+    m_len -= 3;
+#elif defined(NRV2E)
+    b += 2;
+    if (m_len < 2)
+    {
+        if (b >= (int)(orig_len * 9))
+            return -1;
+        return b;
+    }
+    if (m_len < 4)
+    {
+        int bb = b + 1;
+        if (bb >= (int)(orig_len * 9))
+            return -1;
+        return bb;
+    }
+    m_len -= 4;
+#endif
+    do { b += 2; m_len >>= 1; } while (m_len > 0);
+    if (b >= (int)(orig_len * 9))
+        return -1;
+    return b;
+#else
+    (void)s; (void)m_len; (void)m_off;
+    return 0;
+#endif
+}
+
+
 /***********************************************************************
 //
 ************************************************************************/
@@ -543,8 +612,71 @@ void swd_search(ucl_swd_t *s, ucl_uint node, ucl_uint cnt)
 #endif
             if (i > m_len)
             {
+#if defined(M2_MAX_OFFSET)
+                /* NRV-inspired: longest != cheapest. A longer match with a
+                 * huge offset can lose to shorter+small-offset + literals
+                 * for the tail (e.g. 2B len11 off1M=43b vs len10 off100=19b
+                 * +1 lit 9b =28b). Only replace when new beats old+literals
+                 * for the extra bytes. Preserves pruning below (nice/best3)
+                 * which remains safe (old+small dominates old+large). */
+                {
+                    ucl_uint new_off = swd_pos2off(s, node);
+                    if (m_len >= 2)
+                    {
+                        ucl_uint cur_off = swd_pos2off(s, s->m_pos);
+                        /* s->m_pos garbage before first valid (m_len==1
+                         * threshold); only cost-compare once we have a
+                         * valid best. s->m_off not yet set here, recompute
+                         * from m_pos. */
+                        int cur_cost = -1, new_cost = -1;
+                        /* current best may be from search2 (len2 via head2)
+                         * with m_pos set; if m_len<2 treat as none. */
+                        if (m_len >= 2)
+                            cur_cost = swd_match_cost(s, m_len, cur_off);
+                        new_cost = swd_match_cost(s, i, new_off);
+                        if (new_cost < 0)
+                        {
+                            /* invalid/expensive longer: keep old, but still
+                             * allow scan_end update? No, keep old. */
+                        }
+                        else if (cur_cost < 0)
+                        {
+                            /* no valid best yet: take first valid longer */
+                            s->m_len = m_len = i;
+                            s->m_pos = node;
+                        }
+                        else if (new_cost < cur_cost + (int)(i - m_len) * 9)
+                        {
+                            s->m_len = m_len = i;
+                            s->m_pos = node;
+                        }
+                        else
+                        {
+                            /* keep old (cheaper total); do not update */
+                        }
+                    }
+                    else
+                    {
+                        /* no best yet (m_len==1 threshold): take first
+                         * valid longer if cheap (cost check inside). */
+                        int nc = swd_match_cost(s, i, new_off);
+                        if (nc >= 0)
+                        {
+                            s->m_len = m_len = i;
+                            s->m_pos = node;
+                        }
+                        else
+                        {
+                            /* invalid longer still extends m_len for scan
+                             * filter? No: keep threshold so we keep searching
+                             * for valid. Do not update. */
+                        }
+                    }
+                }
+#else
                 s->m_len = m_len = i;
                 s->m_pos = node;
+#endif
                 if (m_len == s->look)
                     return;
                 if (m_len >= s->nice_length)
