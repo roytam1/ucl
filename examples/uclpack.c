@@ -73,6 +73,11 @@ static int opt_debug = 0;
  * a checksum and always use the fast decompressor */
 static ucl_bool opt_fast = 0;
 
+/* NRV-inspired (UPX --best tries 2B/2D/2E): try all three methods per file
+ * and keep smallest total. Opt-in via --all-methods, format-compatible
+ * (header stores single winner method). */
+static ucl_bool opt_all_methods = 0;
+
 /* magic file header for compressed files */
 static const unsigned char magic[8] =
     { 0x00, 0xe9, 0x55, 0x43, 0x4c, 0xff, 0x01, 0x1a };
@@ -219,6 +224,62 @@ int do_compress(FILE *fi, FILE *fo, int method, int level, ucl_uint block_size)
     total_in = total_out = 0;
 
 /*
+ * NRV/UPX-inspired --all-methods: measuring pass (no output, no globals).
+ * Try 2B/2D/2E per block, sum min(out,in) per method, pick smallest total.
+ * Format-compatible (single winner method in file header). Opt-in only.
+ */
+    if (opt_all_methods)
+    {
+        ucl_uint tot_b = 0, tot_d = 0, tot_e = 0;
+        ucl_uint m_len;
+        ucl_uint m_out;
+        int m_r;
+        overhead = get_overhead(0x2d,block_size);
+        in = (ucl_bytep) ucl_malloc(block_size);
+        out = (ucl_bytep) ucl_malloc(block_size + overhead);
+        if (in == NULL || out == NULL)
+        {
+            printf("%s: out of memory\n", progname);
+            r = 1;
+            goto err;
+        }
+        for (;;)
+        {
+            m_len = (ucl_uint) fread(in,1,block_size,fi);
+            if (m_len <= 0)
+                break;
+            m_out = 0;
+            m_r = ucl_nrv2b_99_compress(in,m_len,out,&m_out,0,level,NULL,NULL);
+            if (m_r == UCL_E_OUT_OF_MEMORY) { printf("%s: out of memory in compress\n", progname); r = 1; goto err; }
+            if (m_r != UCL_E_OK || m_out > m_len + get_overhead(0x2b,m_len)) { printf("internal error - compression failed: %d\n", m_r); r = 2; goto err; }
+            tot_b += (m_out < m_len ? m_out : m_len);
+            m_out = 0;
+            m_r = ucl_nrv2d_99_compress(in,m_len,out,&m_out,0,level,NULL,NULL);
+            if (m_r == UCL_E_OUT_OF_MEMORY) { printf("%s: out of memory in compress\n", progname); r = 1; goto err; }
+            if (m_r != UCL_E_OK || m_out > m_len + get_overhead(0x2d,m_len)) { printf("internal error - compression failed: %d\n", m_r); r = 2; goto err; }
+            tot_d += (m_out < m_len ? m_out : m_len);
+            m_out = 0;
+            m_r = ucl_nrv2e_99_compress(in,m_len,out,&m_out,0,level,NULL,NULL);
+            if (m_r == UCL_E_OUT_OF_MEMORY) { printf("%s: out of memory in compress\n", progname); r = 1; goto err; }
+            if (m_r != UCL_E_OK || m_out > m_len + get_overhead(0x2e,m_len)) { printf("internal error - compression failed: %d\n", m_r); r = 2; goto err; }
+            tot_e += (m_out < m_len ? m_out : m_len);
+        }
+        /* tie prefers 2D (default, balanced) via strict < in 2D-first order */
+        method = 0x2d;
+        {
+            ucl_uint best = tot_d;
+            if (tot_b < best) { best = tot_b; method = 0x2b; }
+            if (tot_e < best) { best = tot_e; method = 0x2e; }
+        }
+        set_method_name(method,level);
+        printf("%s: --all-methods chose %s (totals 2B:%lu 2D:%lu 2E:%lu)\n",
+                progname, method_name,
+                (unsigned long)tot_b, (unsigned long)tot_d, (unsigned long)tot_e);
+        rewind(fi);
+        /* keep in/out buffers for second pass below (skip realloc) */
+    }
+
+/*
  * Step 1: write magic header, flags & block size, init checksum
  */
     xwrite(fo,magic,sizeof(magic));
@@ -229,11 +290,19 @@ int do_compress(FILE *fi, FILE *fo, int method, int level, ucl_uint block_size)
     checksum = ucl_adler32(0,NULL,0);
 
 /*
- * Step 2: allocate compression buffers and work-memory
+ * Step 2: allocate compression buffers and work-memory (reused if --all-methods measured)
  */
-    overhead = get_overhead(method,block_size);
-    in = (ucl_bytep) ucl_malloc(block_size);
-    out = (ucl_bytep) ucl_malloc(block_size + overhead);
+    if (in == NULL)
+    {
+        overhead = get_overhead(method,block_size);
+        in = (ucl_bytep) ucl_malloc(block_size);
+    }
+    if (out == NULL)
+    {
+        if (overhead == 0)
+            overhead = get_overhead(method,block_size);
+        out = (ucl_bytep) ucl_malloc(block_size + overhead);
+    }
     if (in == NULL || out == NULL)
     {
         printf("%s: out of memory\n", progname);
@@ -566,6 +635,7 @@ static void usage(void)
     printf("  --nrv2b         use NRV2B compression method\n");
     printf("  --nrv2d         use NRV2D compression method [default]\n");
     printf("  --nrv2e         use NRV2E compression method\n");
+    printf("  --all-methods   try 2B/2D/2E per file, keep smallest (like UPX --best)\n");
     printf("\nother options:\n");
     printf("  -F              do not store or verify a checksum (faster)\n");
     printf("  -Bxxxx          set block-size for compression [default 262144]\n");
@@ -720,6 +790,8 @@ int __acc_cdecl_main main(int argc, char *argv[])
             opt_method = 0x2e;
         else if (strcmp(argv[i],"--nrv2e") == 0)
             opt_method = 0x2e;
+        else if (strcmp(argv[i],"--all-methods") == 0)
+            opt_all_methods = 1;
         else if ((argv[i][1] >= '1' && argv[i][1] <= '9') && !argv[i][2])
             opt_level = argv[i][1] - '0';
         else if (strcmp(argv[i],"--10") == 0)
