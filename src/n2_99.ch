@@ -246,6 +246,7 @@ static int
 len_of_coded_match(UCL_COMPRESS_T *c, ucl_uint m_len, ucl_uint m_off)
 {
     int b;
+    ucl_uint orig_len = m_len;
     if (m_len < 2 || (m_len == 2 && (m_off > M2_MAX_OFFSET))
 #if (M3_MAX_OFFSET <= SWD_N)
         || (m_len == 3 && m_off > M3_MAX_OFFSET && m_off != c->last_m_off)
@@ -287,14 +288,33 @@ len_of_coded_match(UCL_COMPRESS_T *c, ucl_uint m_len, ucl_uint m_off)
 #if defined(NRV2B) || defined(NRV2D)
     b += 2;
     if (m_len < 3)
+    {
+        /* NRV-inspired: don't emit a match that costs as much as
+         * literals (9 bits per literal: 1 flag + 8 data). Short matches
+         * with huge offsets (e.g. len 3-4 with 1M offset = 37 bits vs
+         * 27/36 bits as literals) hurt ratio; NRV's optimal parser
+         * (36-byte DP nodes in sub_4527A0, cost tables in sub_44F820)
+         * skips them via exact DP. Greedy UCL always took them. */
+        if (b >= (int)(orig_len * 9))
+            return -1;
         return b;
+    }
     m_len -= 3;
 #elif defined(NRV2E)
     b += 2;
     if (m_len < 2)
+    {
+        if (b >= (int)(orig_len * 9))
+            return -1;
         return b;
+    }
     if (m_len < 4)
-        return b + 1;
+    {
+        int bb = b + 1;
+        if (bb >= (int)(orig_len * 9))
+            return -1;
+        return bb;
+    }
     m_len -= 4;
 #else
 #  error
@@ -304,6 +324,8 @@ len_of_coded_match(UCL_COMPRESS_T *c, ucl_uint m_len, ucl_uint m_off)
         m_len >>= 1;
     } while (m_len > 0);
 
+    if (b >= (int)(orig_len * 9))
+        return -1;
     return b;
 }
 
@@ -402,12 +424,22 @@ ucl_nrv_99_compress        ( const ucl_bytep in, ucl_uint in_len,
         {   0,   0,   0,  16,    8,   0,  48*1024L },
         {   0,   0,   0,  32,   16,   0,  48*1024L },
         {   1,   4,   4,  16,   16,   0,  48*1024L },
-        {   1,   8,  16,  32,   32,   0,  48*1024L },
-        {   1,   8,  16, 128,  128,   0,  48*1024L },
-        {   2,   8,  32, 128,  256,   0, 128*1024L },
-        {   2,  32, 128,   F, 2048,   1, 128*1024L },
-        {   2,  32, 128,   F, 2048,   1, 256*1024L },
-        {   2,   F,   F,   F, 4096,   1, SWD_N }
+        /* NRV-inspired: much larger windows for mid/high levels.
+         * UPX-NRV (compress_nrv.cpp in upx-nrv308-decomp.exe, sub_40A7FE)
+         * forces max_offset 1M for levels 5-6, 2M for 7-8, 4M for 9-10,
+         * vs UCL's 48k/128k/256k. Larger window is cheap (search cost
+         * bounded by max_chain) and finds distant matches in sparse files.
+         * Chains enlarged accordingly to actually reach distant candidates. */
+        {   1,   8,  16,  32,   64,   0, 1024*1024L },
+        {   1,   8,  16, 128,  256,   0, 1024*1024L },
+        {   2,   8,  32, 128,  512,   0, 2048*1024L },
+        {   2,  32, 128,   F, 4096,   1, 2048*1024L },
+        {   2,  32, 128,   F, 4096,   1, 4096*1024L },
+        /* L10: deeper lazy (2->4) for near-optimal parsing over 4 bytes
+         * ahead (NRV uses full DP with 36-byte nodes, see sub_452180/
+         * sub_4527A0 in upx-nrv308-decomp; 4-step lazy is a safe subset),
+         * chain 4096->8192 to exploit 8M window. */
+        {   4,   F,   F,   F, 8192,   1, SWD_N }
         /* max. compression */
 #undef F
     };
@@ -523,6 +555,44 @@ ucl_nrv_99_compress        ( const ucl_bytep in, ucl_uint in_len,
             continue;
         }
 
+        /* NRV-inspired: skip a match that is more expensive than literals.
+         * len_of_coded_match now returns -1 in that case (see above).
+         * This ports part of NRV's optimal-parser gain (exact cost DP in
+         * sub_4527A0/sub_44F820) into greedy UCL without full DP. */
+        {
+            int _cost = len_of_coded_match(c, m_len, m_off);
+            if (_cost < 0)
+            {
+                lit++;
+                s->max_chain = sc->max_chain;
+                r = find_match(c,s,1,0);
+                assert(r == 0);
+                continue;
+            }
+        }
+
+        /* NRV-inspired rep tie-break (cf. sub_4527A0 memcmp rep check).
+         * swd_search keeps longest (most-recent in chain), but for equal
+         * length rep (last_m_off) is always cheaper (3b vs 10+/9+ bits
+         * for offset). If rep ties longest, use rep. Safe: same length,
+         * strictly fewer bits, decoder-compatible. Only checks within
+         * current block (dict==NULL in this compressor, so rep is always
+         * inside in[0..bp-in) when last<=bp-in).
+         * Format guard: len==2 with large offset (off>M2) is unencodable
+         * (code_match asserts m_len>0 after M2 adjust), so never switch
+         * to rep in that case even on memcmp tie. */
+        if (m_off != c->last_m_off && c->last_m_off > 0 &&
+            c->last_m_off <= (ucl_uint)(c->bp - c->in) &&
+            !(m_len == 2 && c->last_m_off > (ucl_uint)M2_MAX_OFFSET))
+        {
+            if (m_len >= 2 && m_len <= c->look &&
+                c->bp[m_len-1] == *(c->bp - c->last_m_off + m_len - 1) &&
+                ucl_memcmp(c->bp, c->bp - c->last_m_off, m_len) == 0)
+            {
+                m_off = c->last_m_off;
+            }
+        }
+
     /* a match */
 #if defined(SWD_BEST_OFF)
         if (s->use_best_off)
@@ -565,6 +635,16 @@ ucl_nrv_99_compress        ( const ucl_bytep in, ucl_uint in_len,
             if (s->use_best_off)
                 better_match(s,&c->m_len,&c->m_off);
 #endif
+            /* same rep tie-break for lookahead candidate (with len2+M2 guard) */
+            if (c->m_off != c->last_m_off && c->last_m_off > 0 &&
+                c->last_m_off <= (ucl_uint)(c->bp - c->in) &&
+                !(c->m_len == 2 && c->last_m_off > (ucl_uint)M2_MAX_OFFSET) &&
+                c->m_len >= 2 && c->m_len <= c->look &&
+                c->bp[c->m_len-1] == *(c->bp - c->last_m_off + c->m_len - 1) &&
+                ucl_memcmp(c->bp, c->bp - c->last_m_off, c->m_len) == 0)
+            {
+                c->m_off = c->last_m_off;
+            }
             l2 = len_of_coded_match(c,c->m_len,c->m_off);
             if (l2 < 0)
                 continue;
