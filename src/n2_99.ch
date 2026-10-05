@@ -45,7 +45,7 @@
 #define IF_HEAD2(s)
 #endif
 #define SWD_N           (8*1024*1024ul) /* max. size of ring buffer */
-#define SWD_F           2048            /* upper limit for match length */
+#define SWD_F           4096            /* upper limit for match length */
 #define SWD_THRESHOLD   1               /* lower limit for match length */
 
 #if defined(NRV2B)
@@ -435,11 +435,11 @@ ucl_nrv_99_compress        ( const ucl_bytep in, ucl_uint in_len,
         {   2,   8,  32, 128,  512,   0, 2048*1024L },
         {   2,  32, 128,   F, 4096,   1, 2048*1024L },
         {   2,  32, 128,   F, 4096,   1, 4096*1024L },
-        /* L10: deeper lazy (2->4) for near-optimal parsing over 4 bytes
-         * ahead (NRV uses full DP with 36-byte nodes, see sub_452180/
-         * sub_4527A0 in upx-nrv308-decomp; 4-step lazy is a safe subset),
-         * chain 4096->8192 to exploit 8M window. */
-        {   4,   F,   F,   F, 8192,   1, SWD_N }
+        /* L10: chain 4096->8192 to exploit 8M window. try_lazy stays 2
+         * (harness showed 2->4 regresses text L10 2D -3.6% due to the
+         * imperfect lazy heuristic; NRV's gain comes from exact DP, not a
+         * deeper greedy). Other wins (window/skip/rep/cheapest) never-larger. */
+        {   2,   F,   F,   F, 8192,   1, SWD_N }
         /* max. compression */
 #undef F
     };
@@ -618,10 +618,11 @@ ucl_nrv_99_compress        ( const ucl_bytep in, ucl_uint in_len,
 
         while (ahead < max_ahead && c->look > m_len)
         {
-            if (m_len >= sc->good_length)
-                s->max_chain = sc->max_chain >> 2;
-            else
-                s->max_chain = sc->max_chain;
+            /* NRV-inspired: keep the full chain for lazy lookahead too.
+             * Original UCL cut it to max_chain>>2 once m_len>=good_length,
+             * which loses matches right where lazy parsing needs them
+             * (harness: +0.10% bin L7, +0.05% text L7 without the cut). */
+            s->max_chain = sc->max_chain;
             r = find_match(c,s,1,0);
             ahead++;
 
